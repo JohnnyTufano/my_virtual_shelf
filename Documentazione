@@ -1,0 +1,112 @@
+# Documentazione Architetturale - Libreria Virtuale Android
+
+## Architettura Generale
+L'applicazione segue un'architettura layered standard per Android:
+* **UI Layer**: Composto da `MainActivity`, `ScanActivity`, `BookAdapter` e i file di layout XML per l'interazione utente.
+* **Data Layer (Locale)**: Gestito da **Room Database** (`AppDatabase`, `BookDao`, `Book`), garantendo la persistenza offline dei dati.
+* **Data Layer (Remoto)**: Gestito da **Retrofit** (`RetrofitClient`, `OpenLibraryService`, `OpenLibraryResponse`) per la comunicazione HTTP con i server di Open Library.
+* **Hardware Interfacing**: Gestito tramite **CameraX** e **ML Kit** per l'acquisizione dei frame video ed l'elaborazione dei codici a barre.
+
+---
+
+## 1. Struttura del Database (Room)
+
+### Class: `com.example.libreriavirtuale.db.Book`
+Rappresenta l'entità principale del database (tabella `books`). Ogni istanza corrisponde a un libro salvato.
+
+* **Campi e Annotazioni**:
+  * `@PrimaryKey(autoGenerate = true) public int id`: Identificativo univoco auto-incrementante generato dal DB.
+  * `public String isbn`: Codice ISBN univoco del libro/manga scansionato.
+  * `public String title`: Titolo del libro.
+  * `public String author`: Nome/i dell'autore/i o mangaka.
+  * `public String coverUrl`: URL HTTPS dell'immagine di copertina scaricata o formattata.
+  * `public String status`: Stato di lettura (`"Da leggere"`, `"In lettura"`, `"Completato"`).
+* **Costruttore**: Inizializza tutti i campi obbligatori tranne l'ID, delegato al database.
+
+### Interface: `com.example.libreriavirtuale.db.BookDao`
+Interfaccia Data Access Object (DAO) contenente le operazioni CRUD per la tabella `books`.
+
+* **Metodi**:
+  * `@Insert void insert(Book book)`: Inserisce un nuovo libro nella tabella.
+  * `@Delete void delete(Book book)`: Rimuove il libro specificato dal database locale.
+  * `@Update void update(Book book)`: Aggiorna i campi di un libro esistente (usato per il cambio di stato lettura).
+  * `@Query("SELECT * FROM books ORDER BY id DESC") List<Book> getAllBooks()`: Recupera la lista di tutti i libri salvati ordinati per aggiunta più recente.
+
+### Class: `com.example.libreriavirtuale.db.AppDatabase`
+Classe astratta che estende `RoomDatabase` ed implementa il pattern **Singleton** per la gestione del database SQLite.
+
+* **Pattern Singleton**: `getInstance(Context context)` garantisce l'esistenza di un'unica istanza attiva del DB, evitando problemi di concorrenza sui thread e perdite di memoria (*memory leaks*).
+
+---
+
+## 2. Integrazione API Remota (Retrofit)
+
+### Class: `com.example.libreriavirtuale.api.OpenLibraryResponse`
+Classe POJO (*Plain Old Java Object*) utilizzata da **Gson** per la deserializzazione della risposta JSON ottenuta da Open Library.
+
+* **Campi Interni**:
+  * `title`: Titolo restituito dall'API.
+  * `authors`: Lista di oggetti interni `Author` (mappati campo `name`).
+  * `cover`: Oggetto interno contenente gli URL delle copertine.
+* **Metodi Helper**:
+  * `getAuthorsString()`: Itera sulla lista degli autori e restituisce una stringa formattata separata da virgole (es. *"Eiichiro Oda, Akira Toriyama"*). Gestisce i casi di autori nulli o mancanti.
+
+### Interface: `com.example.libreriavirtuale.api.OpenLibraryService`
+Interfaccia che definisce le chiamate HTTP di Retrofit.
+
+* **Metodi**:
+  * `@GET("api/books") Call<Map<String, OpenLibraryResponse>> getBookInfo(...)`: Esegue una richiesta GET passando dinamici query parameters:
+    * `bibkeys`: Identificativo formattato (es. `ISBN:9788869826313`).
+    * `format`: Formato di ritorno (`"json"`).
+    * `jscmd`: Livello di dettaglio richiesto (`"data"`).
+
+### Class: `com.example.libreriavirtuale.api.RetrofitClient`
+Inizializzatore del client HTTP.
+
+* **Funzionamento**: Inizializza l'istanza globale di Retrofit puntando al dominio `https://openlibrary.org/` e aggiunge il converter `GsonConverterFactory` per la traduzione automatica delle risposte JSON in oggetti Java.
+
+---
+
+## 3. Gestione Scansione Fotocamera (CameraX + ML Kit)
+
+### Class: `com.example.libreriavirtuale.ScanActivity`
+Activity responsabile della cattura video in tempo reale e della lettura dei codici a barre.
+
+* **Componenti**:
+  * `PreviewView`: View XML che mostra il flusso di anteprima della fotocamera.
+  * `ExecutorService cameraExecutor`: Thread separato dedicato all'elaborazione delle immagini senza bloccare l'interfaccia utente (UI Thread).
+* **Flusso Operativo**:
+  1. **`startCamera()`**: Richiede il `ProcessCameraProvider`, crea un'istanza di `Preview` e collega il flusso al `PreviewView`.
+  2. **`ImageAnalysis`**: Configura una pipeline di acquisizione dei frame impostando la risoluzione e la strategia `STRATEGY_KEEP_ONLY_LATEST` per evitare rallentamenti e accumulo di frame in memoria.
+  3. **`processImageProxy(...)`**: Trasforma il frame raw (`ImageProxy`) in un oggetto `InputImage` compatibile con ML Kit.
+  4. **`BarcodeScanner`**: Esegue l'analisi sul frame. Se viene rilevato un codice a barre con un valore valido:
+     * Imposta il flag `isScanned = true` per fermare letture doppie.
+     * Restituisce la stringa del codice via `Intent` alla `MainActivity` tramite `setResult(RESULT_OK, ...)`.
+     * Chiude l'activity corrente (`finish()`).
+
+---
+
+## 4. Presentazione e Interfaccia Utente
+
+### Class: `com.example.libreriavirtuale.adapter.BookAdapter`
+Adapter per il componente `RecyclerView` che implementa il Pattern **ViewHolder**.
+
+* **Gestione Filtri**:
+  * Mantiene due liste: `books` (lista attualmente visualizzata) e `bookListFull` (copia completa per ripristinare i dati durante la ricerca).
+  * `filter(String query)`: Confronta la stringa cercata con i titoli e gli autori presenti in lista ed aggiorna la vista con `notifyDataSetChanged()`.
+* **Interfaccia `OnBookClickListener`**:
+  * `onBookClick(Book book)`: Gestisce il tocco semplice sull'elemento (cambio dello stato di lettura).
+  * `onBookLongClick(Book book)`: Gestisce la pressione prolungata (eliminazione del volume).
+* **Integrazione Glide**:
+  * All'interno del metodo `onBindViewHolder`, utilizza la libreria Glide per caricare in modo asincrono l'immagine dalla rete tramite `coverUrl` e gestirne la cache automatica in memoria.
+
+### Class: `com.example.libreriavirtuale.MainActivity`
+Controller principale dell'applicazione.
+
+* **Gestione Permessi e Activity Results**:
+  * `requestPermissionLauncher`: Gestisce la richiesta a runtime del permesso `CAMERA`.
+  * `scanLauncher`: Avvia `ScanActivity` ed elabora il risultato al ritorno, invocando `fetchBookDetails(isbn)`.
+* **Logica Operativa**:
+  1. **`fetchBookDetails(String isbn)`**: Esegue la chiamata di rete asincrona via Retrofit. In caso di successo o errore/mancanza dati online, apre comunque la finestra di dialogo `showAddBookDialog`.
+  2. **`showAddBookDialog(...)`**: Mostra un `AlertDialog` personalizzato caricando il layout `dialog_add_book.xml`. Permette all'utente di modificare titolo, autore, stato di lettura tramite uno `Spinner` e di salvare il record definitivo sul database locale.
+  3. **`loadBooks()`**: Interroga il database Room via `bookDao().getAllBooks()` e passa i dati all'adapter per aggiornare l'interfaccia principale.
